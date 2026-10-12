@@ -80,9 +80,12 @@ ssh labgpu 'nvidia-smi'       # run commands on it
   and CPU. Write results to files as you go, plan longer work in chunks of
   under 2 hours, and run `labgpu up` again to continue. Nothing on the disk is
   lost.
-- **Model size:** the T4 has 16 GB of GPU memory. That fits models up to about
-  7B parameters in 16-bit, or larger ones with 4-bit quantization. It doesn't
-  support bfloat16 natively, so use float16 or float32.
+- **Model size:** the T4 has 16 GB of GPU memory. Models up to about 3-4B
+  parameters fit comfortably in 16-bit. 7-8B models need 8-bit or 4-bit
+  quantization. Larger models won't fit; tell the user to ask the lab admin.
+- **Precision and speed:** the T4 is a Turing GPU, the same generation as the
+  lab server. It has no fast bfloat16 and no FlashAttention 2, so use float16,
+  or float32 to match the lab server's results exactly.
 
 ## 4. Rules
 
