@@ -58,7 +58,10 @@ ssh labgpu 'nvidia-smi'       # run commands on it
   `scp labgpu:results.csv .`.
 - **Python:** create a virtual environment on the machine, for example
   `ssh labgpu 'python3 -m venv ~/env && ~/env/bin/pip install torch transformers'`.
-  Everything on the disk stays there between wakes.
+  Everything on the disk stays there between wakes. If `python3 -m venv` fails
+  with "ensurepip is not available", install it first:
+  `ssh labgpu 'sudo apt-get install -y python3.10-venv'`. The `ubuntu` user can
+  use sudo without a password, so you can install any system packages you need.
 - **Hugging Face:** gated models (Gemma, Llama, ...) need the user's own
   token, and they also need to accept each model's terms on its
   huggingface.co page.
