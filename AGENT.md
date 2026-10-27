@@ -32,7 +32,7 @@ words like these:
 > A sign-in page is opening in your web browser. **First time:** find the email
 > titled "Your Sripada Lab GPU account" (check spam), copy the temporary password
 > into the page, choose your own password, then scan the QR code with an
-> authenticator app on your phone (Duo Mobile works) and type the 6-digit code it
+> authenticator app on your phone (Okta Verify or Duo Mobile) and type the 6-digit code it
 > shows. **After that:** just your lab GPU password and the 6-digit code from the
 > app. Tell me when the page says "You're signed in".
 
@@ -42,6 +42,8 @@ words like these:
   signed in" or "sign-in expired"), run `labgpu login` again with the same
   explanation (no email step this time).
 - If the page didn't open, give the user the link that `labgpu login` printed.
+- If `labgpu login` itself fails with an error (not a wrong password), run the
+  installer again (step 1) to update labgpu, then sign in again.
 - Forgotten password, a lost phone, or "temporary password has expired": ask
   the lab admin (Aman Taxali, ataxali@umich.edu).
 
