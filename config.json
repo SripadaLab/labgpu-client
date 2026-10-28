@@ -1,8 +1,8 @@
 {
   "region": "us-east-2",
-  "user_pool_client_id": "4iaosvo0pp7gkqdkpuadh6uspg",
-  "user_pool_provider": "cognito-idp.us-east-2.amazonaws.com/us-east-2_avHxrH30x",
-  "identity_pool_id": "us-east-2:b7343678-3c5a-491b-8a48-cadc0ba8bb5a",
+  "user_pool_client_id": "hpe3nfgkgdc3uubp0jvoeccf2",
+  "user_pool_provider": "cognito-idp.us-east-2.amazonaws.com/us-east-2_zrrt5Sfiu",
+  "identity_pool_id": "us-east-2:0ca82ca9-9f24-4c62-b39a-67ba23076b52",
   "usage_table": "labgpu-usage",
   "max_hours": 2.0,
   "monthly_cap_usd": 100.0,

@@ -35,6 +35,7 @@ import webbrowser
 HOME = pathlib.Path(__file__).resolve().parent  # ~/.labgpu
 CONFIG = json.loads((HOME / "config.json").read_text())
 REGION = CONFIG["region"]
+BASE = os.environ.get("LABGPU_BASE", "https://raw.githubusercontent.com/SripadaLab/labgpu-client/main")
 TOKENS = HOME / "tokens.json"
 CREDENTIALS = HOME / "credentials.json"
 KEY = HOME / "id_ed25519"
@@ -74,8 +75,23 @@ def cognito(service, action, body):
         raise CognitoError(error.get("message") or error.get("Message") or error.get("__type", "sign-in failed"))
 
 
+def refresh_config():
+    """Fetch the latest public sign-in IDs, so a move to another AWS account needs only a new sign-in."""
+    global CONFIG, REGION
+    try:
+        with urllib.request.urlopen(f"{BASE}/config.json", timeout=15) as reply:
+            new = json.loads(reply.read())
+    except (OSError, ValueError):
+        return
+    needed = {"region", "user_pool_client_id", "user_pool_provider", "identity_pool_id", "usage_table"}
+    if isinstance(new, dict) and needed <= new.keys() and new != CONFIG:
+        (HOME / "config.json").write_text(json.dumps(new, indent=2) + "\n")
+        CONFIG, REGION = new, new["region"]
+
+
 def save_tokens(user, result, refresh_token=None):
     write_private(TOKENS, {
+        "pool": CONFIG["user_pool_provider"],  # a sign-in from another account's pool doesn't count
         "user": user,
         "id_token": result["IdToken"],
         "refresh_token": refresh_token or result["RefreshToken"],
@@ -142,7 +158,7 @@ class LoginFlow:
                               "Continue"), error)
 
     def code_page(self, error=None):
-        return login_page("Enter your code", "<p>Open your authenticator app (for example Duo Mobile) and type "
+        return login_page("Enter your code", "<p>Open your authenticator app (for example Okta Verify or Duo Mobile) and type "
                           "the 6-digit code for <b>SripadaLab-GPU</b>.</p>" + form(
                               self.nonce, "code", field("6-digit code", "code", extra=
                                                         'inputmode="numeric" autocomplete="one-time-code" autofocus'),
@@ -163,8 +179,8 @@ class LoginFlow:
         secret = setup["SecretCode"]
         link = f"otpauth://totp/SripadaLab-GPU:{self.user}?secret={secret}&issuer=SripadaLab-GPU"
         qr = segno.make(link, error="m").svg_inline(scale=6)
-        return login_page("Set up your authenticator", "<p>Open your authenticator app (Duo Mobile, Google "
-                          "Authenticator, 1Password, ...), choose <b>add account</b>, and scan this code:</p>"
+        return login_page("Set up your authenticator", "<p>Open your authenticator app (Okta Verify, Duo "
+                          "Mobile, Google Authenticator, ...), choose <b>add account</b>, and scan this code:</p>"
                           f'<div class="qr">{qr}</div><p><small>Can\'t scan? Enter this key instead: '
                           f"<code>{secret}</code></small></p>" + form(
                               self.nonce, "mfasetup", field("6-digit code shown in the app", "code", extra=
@@ -310,10 +326,12 @@ def serve_page(flow, intro):
 
 
 def cmd_login(args):
+    refresh_config()
     flow = LoginFlow()
     if not serve_page(flow, "A sign-in page is opening in the browser. "
                             "Finish signing in there (password + authenticator code)."):
         fail("Sign-in wasn't finished within 15 minutes. Run `labgpu login` again.", NOT_SIGNED_IN)
+    CREDENTIALS.unlink(missing_ok=True)
     print(f"Signed in as {flow.user} for 12 hours.")
 
 
@@ -330,6 +348,9 @@ def id_token():
     if not TOKENS.exists():
         fail("Not signed in. Run `labgpu login` (the person finishes it in their browser).", NOT_SIGNED_IN)
     tokens = json.loads(TOKENS.read_text())
+    if tokens.get("pool") != CONFIG["user_pool_provider"]:
+        fail("Not signed in to the current lab GPU account. Run `labgpu login` (the person finishes it in their "
+             "browser).", NOT_SIGNED_IN)
     if tokens["expires_at"] - 300 < time.time():
         try:
             result = cognito("cognito-idp", "InitiateAuth", {
@@ -354,7 +375,8 @@ def aws_credentials():
     """1-hour AWS credentials that only work on your own machine and S3 folder."""
     if CREDENTIALS.exists():
         cached = json.loads(CREDENTIALS.read_text())
-        if dt.datetime.fromisoformat(cached["Expiration"]).timestamp() - 300 > time.time():
+        if (cached.get("IdentityPool") == CONFIG["identity_pool_id"]
+                and dt.datetime.fromisoformat(cached["Expiration"]).timestamp() - 300 > time.time()):
             return cached
     logins = {CONFIG["user_pool_provider"]: id_token()}
     try:
@@ -370,6 +392,7 @@ def aws_credentials():
         "SecretAccessKey": raw["SecretKey"],
         "SessionToken": raw["SessionToken"],
         "Expiration": dt.datetime.fromtimestamp(raw["Expiration"], dt.timezone.utc).isoformat(),
+        "IdentityPool": CONFIG["identity_pool_id"],
     }
     write_private(CREDENTIALS, credentials)
     return credentials
@@ -377,7 +400,7 @@ def aws_credentials():
 
 def cmd_credentials(args):
     """For the AWS CLI, if you use it ("credential_process" in profile labgpu)."""
-    print(json.dumps(aws_credentials()))
+    print(json.dumps({k: v for k, v in aws_credentials().items() if k != "IdentityPool"}))
 
 
 # ---------------------------------------------------------------- the machine
@@ -401,12 +424,15 @@ def machine():
     return m
 
 
-def usage(me):
+def usage(m):
+    """This month's GPU hours and cost so far (the guard updates it every 5 minutes while awake)."""
     month = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
-    item = aws("dynamodb").get_item(TableName=CONFIG["usage_table"],
-                                    Key={"owner": {"S": me}, "month": {"S": month}}).get("Item", {})
+    item = aws("dynamodb").get_item(TableName=CONFIG["usage_table"], Key={
+        "owner": {"S": m["tags"]["labgpu-owner"]}, "month": {"S": month}}).get("Item", {})
     hours = float(item.get("seconds", {"N": "0"})["N"]) / 3600
-    cost = float(item.get("cost", {"N": str(CONFIG["disk_monthly_usd"])})["N"])
+    disk = (float(m["tags"]["labgpu-disk-gb"]) * 0.08 if "labgpu-disk-gb" in m["tags"]
+            else CONFIG["disk_monthly_usd"])
+    cost = float(item.get("cost", {"N": str(disk)})["N"])
     return hours, cost
 
 
@@ -418,14 +444,16 @@ def ssm_online(instance_id, since):
 
 def cmd_status(args):
     m = machine()
-    hours, cost = usage(m["tags"]["labgpu-owner"])
+    hours, cost = usage(m)
+    gpu = m["tags"].get("labgpu-gpu", "Tesla T4 16 GB")
+    cap = float(m["tags"].get("labgpu-cap-usd", CONFIG["monthly_cap_usd"]))
     state = {"running": "awake", "stopped": "asleep", "pending": "waking up",
              "stopping": "going to sleep"}.get(m["State"]["Name"], m["State"]["Name"])
-    print(f"Your GPU machine (Tesla T4, 16 GB) is {state}.")
+    print(f"Your GPU machine ({gpu}) is {state}.")
     if m["State"]["Name"] == "running":
         left = CONFIG["max_hours"] * 3600 - (dt.datetime.now(dt.timezone.utc) - m["LaunchTime"]).total_seconds()
         print(f"  It stops in at most {max(0, left) / 60:.0f} minutes (sooner after 30 idle minutes).")
-    print(f"This month: {hours:.1f} GPU hours, about ${cost:.2f} of the ${CONFIG['monthly_cap_usd']:.0f} limit.")
+    print(f"This month: {hours:.1f} GPU hours, about ${cost:.2f} of the ${cap:.0f} limit.")
     if "labgpu-blocked" in m["tags"]:
         print("  The monthly limit is used up, so the machine can't start until next month. Ask the lab admin.")
 
@@ -470,6 +498,11 @@ def cmd_ssh_proxy(args):
     m = machine()
     if m["State"]["Name"] != "running":
         fail("The GPU machine is asleep. Run: labgpu up")
+    # A new machine (recreated, or moved to another account) has a new host key: forget the old one
+    known = HOME / "known_instance"
+    if not known.exists() or known.read_text() != m["InstanceId"]:
+        (HOME / "known_hosts").unlink(missing_ok=True)
+        known.write_text(m["InstanceId"])
     aws("ec2-instance-connect").send_ssh_public_key(
         InstanceId=m["InstanceId"], InstanceOSUser="ubuntu", SSHPublicKey=(HOME / "id_ed25519.pub").read_text())
     ssm = aws("ssm")

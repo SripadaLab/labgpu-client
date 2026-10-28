@@ -1,11 +1,55 @@
 # Lab GPU: instructions for Claude agents
 
 Your user (a Sripada Lab member) has a personal GPU machine in the lab's AWS
-account: Ubuntu 22.04, one NVIDIA Tesla T4 (16 GB), 4 vCPUs, 16 GB RAM, a
-120 GB disk, Python 3.10 and CUDA drivers. It sleeps when unused. You wake it
+account: Ubuntu 22.04, one NVIDIA GPU, 4 vCPUs, 16-32 GB RAM, a disk of 120 GB
+or more, Python 3.10 and CUDA drivers. Most people have a Tesla T4 (16 GB); some
+have a bigger GPU. `labgpu status` shows which GPU and the monthly limit. It
+sleeps when unused. You wake it
 with `labgpu up` and run commands on it over SSH (`ssh labgpu ...`). Your user
 is probably not technical, so do the technical work yourself and explain
 things in plain words.
+
+## 0. Check first: moving from the old account
+
+In October 2026 the lab GPU moved to a new AWS account, with a fresh, empty
+machine for each person. Run this before anything else:
+
+```bash
+[ -f ~/.labgpu/labgpu.py ] && ! grep -q refresh_config ~/.labgpu/labgpu.py && echo OLD-ACCOUNT
+```
+
+If it prints nothing, skip to step 1. If it prints `OLD-ACCOUNT`, the user is
+still set up for the old account. Move them over in this order, and **don't
+re-run the installer until step 4 below**: after that the old machine can't be
+reached.
+
+1. **Sign in to the old account.** Run `~/.labgpu/bin/labgpu status`. If it exits
+   with code 3, run `~/.labgpu/bin/labgpu login`. Before the page opens, tell
+   the user they'll use their *current* lab GPU password and the code from their
+   *existing* SripadaLab-GPU entry in Okta Verify or Duo Mobile. Then run
+   `~/.labgpu/bin/labgpu up`.
+2. **Back up their files.**
+   - Show what's on the machine:
+     `ssh labgpu 'du -sh ~/* ~/.[!.]* 2>/dev/null | sort -h'`.
+   - Suggest skipping anything that can be re-downloaded or rebuilt: `~/.cache`
+     (including Hugging Face models) and virtual environments.
+   - Check the user's computer has room, then copy what they approve with
+     `rsync -av labgpu:<path> ~/labgpu-old-machine/`.
+   - Check the copy finished, then run `~/.labgpu/bin/labgpu down`.
+3. **Install and sign in to the new account.** Run the installer (step 1 below),
+   then `labgpu login` (step 2 below). This is a first-time sign-in: the
+   temporary password is in a *new* "Your Sripada Lab GPU account" email. Tell
+   the user the new QR code replaces their old SripadaLab-GPU entry in the app.
+4. **Restore.**
+   - Run `labgpu up`.
+   - Copy the files back with `rsync -av ~/labgpu-old-machine/ labgpu:~/`.
+   - Recreate any Python environments they had.
+   - Run `labgpu down`.
+   - Tell the user, in plain words, what was moved and what was skipped. Keep
+     `~/labgpu-old-machine` until they say to delete it.
+
+If the user's temporary password has expired, or anything here fails, ask the
+lab admin.
 
 ## 1. Install (once)
 
@@ -85,20 +129,28 @@ ssh labgpu 'nvidia-smi'       # run commands on it
   and CPU. Write results to files as you go, plan longer work in chunks of
   under 2 hours, and run `labgpu up` again to continue. Nothing on the disk is
   lost.
-- **Model size:** the T4 has 16 GB of GPU memory. Models up to about 3-4B
-  parameters fit comfortably in 16-bit. 7-8B models need 8-bit or 4-bit
-  quantization. Larger models won't fit; tell the user to ask the lab admin.
-- **Precision and speed:** the T4 is a Turing GPU, the same generation as the
-  lab server. It has no fast bfloat16 and no FlashAttention 2, so use float16,
-  or float32 to match the lab server's results exactly.
+- **Model size** depends on the GPU's memory (`labgpu status` shows it):
+  - **T4, 16 GB:** up to about 3-4B parameters in 16-bit; 7-8B need 8-bit or
+    4-bit quantization.
+  - **L4 or A10G, 24 GB:** up to about 8B in 16-bit, 13B in 8-bit, 30B in 4-bit.
+  - **L40S, 48 GB:** up to about 20B in 16-bit, 30B in 8-bit, 70B in 4-bit (tight).
+  - Bigger than that won't fit. Tell the user the lab admin can give them a
+    bigger GPU.
+- **Precision and speed:**
+  - The T4 is a Turing GPU, the same generation as the lab server. It has no
+    fast bfloat16 and no FlashAttention 2, so use float16, or float32 to match
+    the lab server's results exactly.
+  - L4, A10G and L40S support bfloat16 and FlashAttention 2. Use float32 when
+    results must match the lab server exactly.
 
 ## 4. Rules
 
 - **No participant data, PHI or other regulated research data** on this machine,
   ever. Public models, synthetic prompts and published datasets only. If a task
   needs participant data, stop and tell the user to ask the lab admin.
-- **Cost:** about $0.53 per hour while awake, with a $100 per month limit per
-  person. Check it with `labgpu status`. When the limit is reached, the
+- **Cost:** while awake, about $0.53 per hour for a T4, $0.81 for an L4, $1.01
+  for an A10G and $1.87 for an L40S. Each person has a monthly limit ($100
+  unless the lab admin set another). Check both with `labgpu status`. When the limit is reached, the
   machine can't start until the 1st of next month. Run `labgpu down` when
   you're done instead of waiting for the idle timeout.
 - Don't share the machine or its access with anyone else.
