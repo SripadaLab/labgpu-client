@@ -17,6 +17,7 @@ Installed by install.sh into ~/.labgpu (see AGENT.md). Exit code 3 means
 import argparse
 import base64
 import datetime as dt
+import hashlib
 import html
 import http.server
 import json
@@ -60,12 +61,12 @@ class CognitoError(Exception):
     pass
 
 
-def cognito(service, action, body):
+def cognito(service, action, body, region=None):
     """Call one of Cognito's public sign-in APIs (they need no AWS credentials)."""
     prefix = {"cognito-idp": "AWSCognitoIdentityProviderService",
               "cognito-identity": "AWSCognitoIdentityService"}[service]
     request = urllib.request.Request(
-        f"https://{service}.{REGION}.amazonaws.com/", data=json.dumps(body).encode(),
+        f"https://{service}.{region or REGION}.amazonaws.com/", data=json.dumps(body).encode(),
         headers={"Content-Type": "application/x-amz-json-1.1", "X-Amz-Target": f"{prefix}.{action}"})
     try:
         with urllib.request.urlopen(request, timeout=30) as reply:
@@ -89,9 +90,10 @@ def refresh_config():
         CONFIG, REGION = new, new["region"]
 
 
-def save_tokens(user, result, refresh_token=None):
+def save_tokens(user, result, refresh_token=None, pool=None, client=None):
     write_private(TOKENS, {
-        "pool": CONFIG["user_pool_provider"],  # a sign-in from another account's pool doesn't count
+        "pool": pool or CONFIG["user_pool_provider"],  # a sign-in from another account's pool doesn't count
+        "client": client or CONFIG["user_pool_client_id"],
         "user": user,
         "id_token": result["IdToken"],
         "refresh_token": refresh_token or result["RefreshToken"],
@@ -113,6 +115,13 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8">
  button {{ margin-top: 20px; width: 100%; font-size: 17px; padding: 11px; border: 0; border-radius: 8px;
           background: #00274c; color: #fff; cursor: pointer; }}
  .err {{ background: #fef2f2; color: #991b1b; padding: 10px 12px; border-radius: 8px; }}
+ a.umich {{ display: block; margin: 20px 0 6px; text-align: center; font-size: 17px; padding: 12px;
+           border-radius: 8px; background: #00274c; color: #ffcb05; font-weight: 700; text-decoration: none; }}
+ a.umich:hover {{ background: #00396e; }}
+ details {{ margin-top: 22px; border-top: 1px solid #e7e5e4; padding-top: 14px; }}
+ summary {{ cursor: pointer; color: #57534e; font-size: 15px; text-align: center; }}
+ details button {{ background: #fff; color: #00274c; border: 1px solid #00274c; }}
+ .hint {{ font-size: 14px; color: #78716c; }}
  .qr {{ text-align: center; margin: 12px 0; }} code {{ word-break: break-all; font-size: 13px; }}
  small {{ color: #78716c; }}
 </style></head><body><main><h1>{title}</h1>{body}</main></body></html>"""
@@ -134,8 +143,23 @@ def field(label, name, kind="text", value="", extra=""):
             f'value="{html.escape(value)}" required {extra}>')
 
 
+def claims_of(token):
+    payload = token.split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+
+
+def region_of(pool):
+    """The region in a pool name like cognito-idp.us-east-2.amazonaws.com/us-east-2_abc."""
+    return pool.split(".")[1]
+
+
 class LoginFlow:
-    """The sign-in steps, driven by a small page served on 127.0.0.1 only."""
+    """The sign-in steps, driven by a small page served on 127.0.0.1 only.
+
+    Two ways in: "Sign in with U-M" (U-M Okta through the lab's shared pool at
+    login.cap-study.com; the browser comes back to localhost:<port>/callback), or
+    the lab GPU password plus an authenticator code (for people without U-M login).
+    """
 
     def __init__(self):
         self.nonce = secrets.token_urlsafe(16)
@@ -143,19 +167,35 @@ class LoginFlow:
         self.user = json.loads(TOKENS.read_text()).get("user", "") if TOKENS.exists() else ""
         self.session = None
         self.done = threading.Event()
+        self.umich = CONFIG.get("umich")
+        self.ports = self.umich["callback_ports"] if self.umich else []
+        self.port = None  # set by serve_page
+        self.verifier = secrets.token_urlsafe(48)
 
-    def start_page(self, error=None):
-        first_time = "" if self.user else (
-            "<p><b>First time?</b> Find the email titled <b>“Your Sripada Lab GPU account”</b> (from "
-            "no-reply@verificationemail.com; check spam too). Copy the <b>temporary password</b> in it and "
-            "paste it below. You'll choose your own password next.</p>")
-        return login_page("Sign in to your lab GPU", first_time + "<p>This is not your U-M or computer password. "
-                          "It's the lab GPU password: the temporary one from the email the first time, then the "
-                          "one you chose.</p>" + form(
-                              self.nonce, "password",
-                              field("Your U-M uniqname", "user", value=self.user, extra="autocapitalize=off") +
-                              field("Lab GPU password", "password", "password", extra="autofocus"),
-                              "Continue"), error)
+    def redirect_uri(self):
+        return f"http://localhost:{self.port}/callback"
+
+    def umich_url(self):
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(self.verifier.encode()).digest()).rstrip(b"=").decode()
+        return self.umich["domain"] + "/oauth2/authorize?" + urllib.parse.urlencode({
+            "response_type": "code", "client_id": self.umich["client_id"], "redirect_uri": self.redirect_uri(),
+            "scope": "openid email profile", "state": self.nonce, "identity_provider": "UMich",
+            "code_challenge": challenge, "code_challenge_method": "S256"})
+
+    def start_page(self, error=None, password_open=False):
+        password = form(self.nonce, "password",
+                        field("Uniqname", "user", value=self.user, extra="autocapitalize=off") +
+                        field("Lab GPU password", "password", "password") +
+                        ("" if self.user else '<p class="hint">First time? Use the temporary password from the '
+                         'email “Your Sripada Lab GPU account”.</p>'), "Continue")
+        if not (self.umich and self.port in self.ports):
+            return login_page("Sign in to your lab GPU", password, error)
+        was_password = TOKENS.exists() and json.loads(TOKENS.read_text()).get("pool") == CONFIG["user_pool_provider"]
+        opened = " open" if password_open or was_password else ""
+        return login_page("Sign in to your lab GPU",
+                          f'<a class="umich" href="{html.escape(self.umich_url())}">Sign in with U-M</a>'
+                          f"<details{opened}><summary>No U-M login? Use a lab GPU password</summary>{password}"
+                          "</details>", error)
 
     def code_page(self, error=None):
         return login_page("Enter your code", "<p>Open your authenticator app (for example Okta Verify or Duo Mobile) and type "
@@ -187,6 +227,42 @@ class LoginFlow:
                                                             'inputmode="numeric" autocomplete="one-time-code"'),
                               "Finish setup"), error)
 
+    def callback(self, query):
+        """The browser is back from U-M login with a one-time code: trade it for tokens."""
+        if query.get("state", [""])[0] != self.nonce:
+            return login_page("Sign-in problem", "<p>This sign-in link is out of date. Run <code>labgpu login</code> "
+                              "again.</p>")
+        if "code" not in query:
+            reason = query.get("error_description", query.get("error", ["unknown"]))[0]
+            return self.start_page(f"U-M sign-in didn't finish ({reason}). Try again, or ask the lab admin.")
+        body = urllib.parse.urlencode({
+            "grant_type": "authorization_code", "client_id": self.umich["client_id"], "code": query["code"][0],
+            "redirect_uri": self.redirect_uri(), "code_verifier": self.verifier}).encode()
+        try:
+            with urllib.request.urlopen(urllib.request.Request(
+                    self.umich["domain"] + "/oauth2/token", body,
+                    {"Content-Type": "application/x-www-form-urlencoded"}), timeout=30) as reply:
+                tokens = json.loads(reply.read())
+        except (OSError, ValueError) as e:
+            return self.start_page(f"U-M sign-in didn't finish ({e}). Try again, or ask the lab admin.")
+        self.user = claims_of(tokens["id_token"]).get("custom:uniqname", "")
+        save_tokens(self.user, {"IdToken": tokens["id_token"], "RefreshToken": tokens["refresh_token"],
+                                "ExpiresIn": tokens["expires_in"]},
+                    pool=self.umich["provider"], client=self.umich["client_id"])
+        return self.finish()
+
+    def finish(self):
+        CREDENTIALS.unlink(missing_ok=True)
+        try:
+            aws_credentials()
+        except SystemExit:
+            TOKENS.unlink(missing_ok=True)
+            return login_page("Sign-in problem", "<p>You signed in, but the lab GPU account didn't accept it. "
+                              "Please tell the lab admin (Aman Taxali, ataxali@umich.edu).</p>")
+        self.done.set()
+        return login_page("You're signed in", "<p>All set for the next 12 hours. You can close this tab "
+                          "and go back to your agent.</p>")
+
     def next_page(self, reply):
         """Show whatever Cognito asks for next, or finish."""
         if "AuthenticationResult" in reply:
@@ -197,11 +273,7 @@ class LoginFlow:
                 "AccessToken": result["AccessToken"],
                 "SoftwareTokenMfaSettings": {"Enabled": True, "PreferredMfa": True}})
             save_tokens(self.user, result)
-            CREDENTIALS.unlink(missing_ok=True)
-            aws_credentials()
-            self.done.set()
-            return login_page("You're signed in", "<p>All set for the next 12 hours. You can close this tab "
-                              "and go back to your agent.</p>")
+            return self.finish()
         self.session = reply["Session"]
         return {"SOFTWARE_TOKEN_MFA": self.code_page, "NEW_PASSWORD_REQUIRED": self.new_password_page,
                 "MFA_SETUP": self.mfa_setup_page}.get(reply["ChallengeName"], lambda: login_page(
@@ -248,7 +320,7 @@ class LoginFlow:
             elif "incorrect username or password" in lowered:
                 message = ("That uniqname and password don't match. First sign-in? Paste the temporary password "
                            "from the email exactly, with no spaces before or after.")
-            return self.start_page(message)
+            return self.start_page(message, password_open=True)
         return self.start_page()
 
 
@@ -299,7 +371,11 @@ def serve_page(flow, intro):
             self.wfile.write(body)
 
         def do_GET(self):
-            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            url = urllib.parse.urlparse(self.path)
+            query = urllib.parse.parse_qs(url.query)
+            if url.path == "/callback" and hasattr(flow, "callback"):
+                self.send_page(flow.callback(query))  # checks its own state value
+                return
             if query.get("k", [""])[0] != flow.nonce:
                 self.send_error(404)
                 return
@@ -313,8 +389,15 @@ def serve_page(flow, intro):
                 return
             self.send_page(flow.handle(data))
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    url = f"http://127.0.0.1:{server.server_address[1]}/?k={flow.nonce}"
+    # U-M sign-in can only come back to the registered ports; otherwise any free port
+    for port in [*getattr(flow, "ports", []), 0]:
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            break
+        except OSError:
+            continue
+    flow.port = server.server_address[1]
+    url = f"http://127.0.0.1:{flow.port}/?k={flow.nonce}"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(intro)
     print(f"If no page opened, open this link: {url}", flush=True)
@@ -329,7 +412,7 @@ def cmd_login(args):
     refresh_config()
     flow = LoginFlow()
     if not serve_page(flow, "A sign-in page is opening in the browser. "
-                            "Finish signing in there (password + authenticator code)."):
+                            "Finish signing in there (U-M login, or lab GPU password + authenticator code)."):
         fail("Sign-in wasn't finished within 15 minutes. Run `labgpu login` again.", NOT_SIGNED_IN)
     CREDENTIALS.unlink(missing_ok=True)
     print(f"Signed in as {flow.user} for 12 hours.")
@@ -348,27 +431,28 @@ def id_token():
     if not TOKENS.exists():
         fail("Not signed in. Run `labgpu login` (the person finishes it in their browser).", NOT_SIGNED_IN)
     tokens = json.loads(TOKENS.read_text())
-    if tokens.get("pool") != CONFIG["user_pool_provider"]:
+    if tokens.get("pool") not in (CONFIG["user_pool_provider"], (CONFIG.get("umich") or {}).get("provider")):
         fail("Not signed in to the current lab GPU account. Run `labgpu login` (the person finishes it in their "
              "browser).", NOT_SIGNED_IN)
     if tokens["expires_at"] - 300 < time.time():
         try:
             result = cognito("cognito-idp", "InitiateAuth", {
-                "AuthFlow": "REFRESH_TOKEN_AUTH", "ClientId": CONFIG["user_pool_client_id"],
-                "AuthParameters": {"REFRESH_TOKEN": tokens["refresh_token"]}})["AuthenticationResult"]
+                "AuthFlow": "REFRESH_TOKEN_AUTH", "ClientId": tokens.get("client", CONFIG["user_pool_client_id"]),
+                "AuthParameters": {"REFRESH_TOKEN": tokens["refresh_token"]}},
+                region=region_of(tokens["pool"]))["AuthenticationResult"]
         except CognitoError:
             fail("Sign-in expired (it lasts 12 hours). Run `labgpu login` (the person finishes it in their browser).",
                  NOT_SIGNED_IN)
-        save_tokens(tokens["user"], result, refresh_token=tokens["refresh_token"])
+        save_tokens(tokens["user"], result, refresh_token=tokens["refresh_token"], pool=tokens["pool"],
+                    client=tokens.get("client"))
         tokens = json.loads(TOKENS.read_text())
     return tokens["id_token"]
 
 
 def owner():
-    """Your uniqname, as the lab admin set it on your account."""
-    payload = id_token().split(".")[1]
-    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    return claims["custom:owner"]
+    """Your uniqname: set by the lab admin on a password account, or from U-M login."""
+    claims = claims_of(id_token())
+    return claims.get("custom:owner") or claims["custom:uniqname"]
 
 
 def aws_credentials():
@@ -378,7 +462,8 @@ def aws_credentials():
         if (cached.get("IdentityPool") == CONFIG["identity_pool_id"]
                 and dt.datetime.fromisoformat(cached["Expiration"]).timestamp() - 300 > time.time()):
             return cached
-    logins = {CONFIG["user_pool_provider"]: id_token()}
+    token = id_token()
+    logins = {json.loads(TOKENS.read_text())["pool"]: token}
     try:
         identity = cognito("cognito-identity", "GetId", {"IdentityPoolId": CONFIG["identity_pool_id"],
                                                          "Logins": logins})

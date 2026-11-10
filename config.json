@@ -6,5 +6,15 @@
   "usage_table": "labgpu-usage",
   "max_hours": 2.0,
   "monthly_cap_usd": 100.0,
-  "disk_monthly_usd": 9.6
+  "disk_monthly_usd": 9.6,
+  "umich": {
+    "provider": "cognito-idp.us-east-2.amazonaws.com/us-east-2_iBgPcBCHo",
+    "client_id": "52aaqgg19m60fuirbs67l5ti94",
+    "domain": "https://login.cap-study.com",
+    "callback_ports": [
+      8793,
+      8794,
+      8795
+    ]
+  }
 }

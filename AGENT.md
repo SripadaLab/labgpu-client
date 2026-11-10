@@ -37,9 +37,10 @@ reached.
      `rsync -av labgpu:<path> ~/labgpu-old-machine/`.
    - Check the copy finished, then run `~/.labgpu/bin/labgpu down`.
 3. **Install and sign in to the new account.** Run the installer (step 1 below),
-   then `labgpu login` (step 2 below). This is a first-time sign-in: the
-   temporary password is in a *new* "Your Sripada Lab GPU account" email. Tell
-   the user the new QR code replaces their old SripadaLab-GPU entry in the app.
+   then `labgpu login` (step 2 below). With a U-M login they just click **Sign
+   in with U-M**. Otherwise it's a first-time sign-in: the temporary password is
+   in a *new* "Your Sripada Lab GPU account" email, and the new QR code replaces
+   their old SripadaLab-GPU entry in the app.
 4. **Restore.**
    - Run `labgpu up`.
    - Copy the files back with `rsync -av ~/labgpu-old-machine/ labgpu:~/`.
@@ -73,22 +74,31 @@ Run `~/.labgpu/bin/labgpu login`. It opens a sign-in page in the browser and
 waits up to 15 minutes. **Before running it**, tell the user what's coming, in
 words like these:
 
-> A sign-in page is opening in your web browser. **First time:** find the email
-> titled "Your Sripada Lab GPU account" (check spam), copy the temporary password
-> into the page, choose your own password, then scan the QR code with an
-> authenticator app on your phone (Okta Verify or Duo Mobile) and type the 6-digit code it
-> shows. **After that:** just your lab GPU password and the 6-digit code from the
-> app. Tell me when the page says "You're signed in".
+> A sign-in page is opening in your web browser. **If you have a U-M login,**
+> click the yellow **Sign in with U-M** button and sign in as you usually do
+> (uniqname, password, Duo or Okta Verify). That's all.
+>
+> **Without a U-M login,** use the lab GPU password instead. **First time:** find
+> the email titled "Your Sripada Lab GPU account" (check spam), copy the temporary
+> password into the page, choose your own password, then scan the QR code with an
+> authenticator app on your phone (Okta Verify or Duo Mobile) and type the 6-digit
+> code it shows. **After that:** just your lab GPU password and the 6-digit code.
+>
+> Tell me when the page says "You're signed in".
 
 - Never ask the user to type their password or code into the chat, and never
   try to fill the page yourself.
 - A sign-in lasts 12 hours. If any labgpu command exits with **code 3** ("not
   signed in" or "sign-in expired"), run `labgpu login` again with the same
   explanation (no email step this time).
+- If U-M sign-in says the person doesn't have access, or the page says the lab
+  GPU account "didn't accept it", ask the lab admin. The password option still
+  works meanwhile.
 - If the page didn't open, give the user the link that `labgpu login` printed.
 - If `labgpu login` itself fails with an error (not a wrong password), run the
   installer again (step 1) to update labgpu, then sign in again.
-- Forgotten password, a lost phone, or "temporary password has expired": ask
+- Forgotten lab GPU password, a lost phone, or "temporary password has
+  expired": suggest **Sign in with U-M** if they have a U-M login. Otherwise ask
   the lab admin (Aman Taxali, ataxali@umich.edu).
 
 ## 3. Use the machine
